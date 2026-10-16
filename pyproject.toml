@@ -1,0 +1,2 @@
+[tool.codespell]
+skip = "*.svg,*.min.js,docs/_build/*,*_build/*,*/_build/*"
