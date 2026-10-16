@@ -1,0 +1,4 @@
+.venv
+docs/_build
+docs/_build/latex
+.git
