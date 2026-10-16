@@ -89,7 +89,7 @@ BasedOnStyles = Vale
 ## Орфография
 
 `codespell` — простой и быстрый спелчекер. Ловит опечатки и типичные
-ошибки (например, `recieve` → `receive`).
+ошибки.
 
     pip install codespell
     codespell docs/

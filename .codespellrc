@@ -1,0 +1,3 @@
+[codespell]
+skip = *.svg,*.min.js,docs/_build/*,*_build/*,*.map
+ignore-words-list = nd,ba,ot,te

@@ -32,6 +32,7 @@ jobs:
         run: codespell docs/  
   
   build:
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +48,7 @@ jobs:
           path: docs/_build/html
 
   deploy:
-    needs: build
+    needs: [checks, build]
     runs-on: ubuntu-latest
     environment:
       name: github-pages
