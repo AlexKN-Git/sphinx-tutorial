@@ -5,3 +5,17 @@ services:
       - "8000:8000"
     volumes:
       - ./docs:/docs
+    depends_on:
+      checks:
+        condition: service_completed_successfully
+
+  checks:
+    build: .
+    volumes:
+      - ./docs:/docs
+      - ./.codespellrc:/docs/.codespellrc:ro
+      - ./pyproject.toml:/docs/pyproject.toml:ro
+    command: >
+      sh -c "sphinx-build -b html -W --keep-going . _build/html &&
+             sphinx-build -b linkcheck . _build/linkcheck &&
+             codespell ."
