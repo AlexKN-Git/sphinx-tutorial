@@ -15,8 +15,8 @@ Docker позволяет собирать документацию в один�
 ## Что нужно
 
 - Docker Desktop (на Windows — с бэкендом WSL2).
-- Файлы: `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `.dockerignore`
-  в корне проекта.
+- Файлы в корне проекта: `Dockerfile`, `docker-compose.yml`,
+  `requirements.txt`, `.dockerignore`.
 
 ## `requirements.txt`
 
@@ -25,7 +25,11 @@ sphinx
 myst-parser
 furo
 sphinx-autobuild
+codespell
 ```
+
+`codespell` нужен для сервиса `checks`. Если держать его только в `.venv`,
+внутри контейнера команда `codespell` не найдётся.
 
 ## `Dockerfile`
 
@@ -38,6 +42,11 @@ EXPOSE 8000
 CMD ["sphinx-autobuild", ".", "_build/html", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
+- Базовый образ — `python:3.12-slim`, лёгкий.
+- `WORKDIR /docs` — рабочая папка внутри контейнера, в неё монтируется `docs/` с хоста.
+- Зависимости ставятся один раз, при сборке образа.
+- `CMD` запускает живой предпросмотр. Но `CMD` переопределяется в `docker-compose.yml` для каждого сервиса.
+
 ## `docker-compose.yml`
 
 ```yaml
@@ -48,47 +57,191 @@ services:
       - "8000:8000"
     volumes:
       - ./docs:/docs
+
+  checks:
+    build: .
+    volumes:
+      - ./docs:/docs
+      - ./.codespellrc:/docs/.codespellrc:ro
+    command: >
+      sh -c "sphinx-build -b html -W --keep-going . _build/html &&
+             sphinx-build -b linkcheck . _build/linkcheck &&
+             codespell ."
 ```
 
-## `.dockerignore`
+## Как работают сервисы
 
-```
-.venv
-docs/_build
-docs/_build/latex
-.git
-```
+### `docs` — живой предпросмотр
 
-## Команды
+- Пробрасывает порт: `8000` на хосте → `8000` в контейнере.
+- Монтирует `./docs` в `/docs` — изменения в файлах сразу видны внутри.
+- Запускает `sphinx-autobuild` (из `CMD` в `Dockerfile`).
 
-Сборка образа и запуск:
+Команда:
 
 ```bash
-docker compose up --build
+docker compose up docs
 ```
 
-Сайт: `http://localhost:8000`.
+Явное указание `docs` важно: без него Compose попытается запустить
+и `checks`, который один раз выполнит проверки и завершится. Для
+повседневной работы это лишнее.
 
-Остановить:
+### `checks` — проверки в чистом окружении
+
+- Не пробрасывает порт — это не сервер.
+- Монтирует `./docs` в `/docs` — как `docs`.
+- Дополнительно монтирует `.codespellrc` в `/docs/.codespellrc` **только для чтения** (`:ro`).
+- Через `command` переопределяет `CMD` — вместо `sphinx-autobuild`
+  выполняет цепочку из трёх проверок, соединённых `&&`.
+
+Как работает `sh -c "... && ... && ..."`:
+
+- `sh -c` запускает POSIX-shell внутри контейнера.
+- `&&` выполняет следующую команду, только если предыдущая вернула 0.
+- Если любая проверка упала — цепочка останавливается, контейнер
+  завершается с ненулевым кодом, `docker compose run` вернёт этот же код
+  на хост.
+
+Запуск:
 
 ```bash
-docker compose down
+docker compose run --rm checks
 ```
 
-Собрать HTML без сервера:
+`--rm` удаляет контейнер после выполнения. Без него контейнеры `checks`
+будут накапливаться в статусе `Exited`.
+
+### Почему конфиг монтируется отдельным томом
+
+`codespell` ищет конфиг в **текущей рабочей директории** — внутри
+контейнера это `/docs`. Если монтировать только `./docs:/docs`, файл
+`.codespellrc` из корня проекта в контейнер **не попадёт**, и настройки
+проигнорируются.
+
+Решение — смонтировать конфиг явно:
+
+```yaml
+volumes:
+  - ./docs:/docs
+  - ./.codespellrc:/docs/.codespellrc:ro
+```
+
+`:ro` — только для чтения, чтобы контейнер не мог случайно испортить файл.
+
+Альтернативы:
+
+- Переместить конфиг в `docs/` (но тогда он «уезжает» из корня проекта).
+- Передать путь явно: `codespell --config /tmp/.codespellrc .` и смонтировать в `/tmp`.
+- Прописать все параметры прямо в `command` (неудобно при большом конфиге).
+
+Для нашего проекта выбран второй вариант — конфиг остаётся в корне,
+монтируется только там, где нужен.
+
+## Разница `up` и `run`
+
+| Команда | Что делает |
+|---|---|
+| `docker compose up docs` | Запускает долгоживущий сервис, держит порт, ждёт Ctrl+C |
+| `docker compose run --rm checks` | Запускает разовый контейнер, ждёт завершения, удаляет |
+
+`up` — для сервисов-серверов. `run` — для одноразовых задач: проверки,
+сборка, миграции.
+
+## Сборка образа: `up` vs `up --build`
+
+- `docker compose up` — если образа нет, соберёт. Если есть — использует как есть.
+- `docker compose up --build` — **всегда** пересобирает образ.
+- `docker compose build --no-cache` — пересобирает, **игнорируя кэш**.
+
+Когда что нужно:
+
+- Менял `.md` или `conf.py` — пересборка **не нужна** (файлы монтируются с хоста).
+- Менял `Dockerfile` или `requirements.txt` — нужен `--build`.
+- Хочешь гарантированно свежие пакеты — `--no-cache`.
+
+## Два образа вместо одного
+
+Если в будущем понадобится собирать PDF в Docker (через XeLaTeX),
+TeX Live утяжелит образ до 1.5–3 ГБ. В этом случае лучше **разделить образы**:
+
+- `Dockerfile` — лёгкий, для HTML (то, что у нас сейчас).
+- `Dockerfile.pdf` — тяжёлый, для PDF (с `texlive-xetex`, `latexmk`, `fonts-dejavu`).
+
+В `docker-compose.yml` это выражается через `dockerfile:` в `build`:
+
+```yaml
+  pdf:
+    build:
+      context: .
+      dockerfile: Dockerfile.pdf
+    volumes:
+      - ./docs:/docs
+```
+
+Пока PDF собирается локально через системный TeX Live — это не нужно.
+Если/когда понадобится автоматизация PDF на CI — вернёмся к этому.
+
+## Управление образами и контейнерами
+
+### Почему образ «используется», хотя контейнеров нет
+
+Docker не даёт удалить образ, если на него ссылается **хоть один**
+контейнер — даже остановленный. Проверить всех пользователей образа:
 
 ```bash
-docker compose run --rm docs sphinx-build -b html . _build/html
+docker ps -a --filter ancestor=<IMAGE_ID>
 ```
 
-Собрать LaTeX:
+Если контейнеры есть — удалить их:
 
 ```bash
-docker compose run --rm docs sphinx-build -b latex . _build/latex
+docker container prune
 ```
+
+Если контейнеров нет, а образ всё равно не удаляется — дело в кэше
+сборки. Почистить:
+
+```bash
+docker builder prune
+```
+
+### Полезные команды
+
+```bash
+docker ps -a              # все контейнеры, включая остановленные
+docker images             # все образы
+docker system df          # сколько занимают образы, контейнеры, кэш
+docker system prune       # убрать всё неиспользуемое
+docker compose down       # остановить и удалить контейнеры текущего проекта
+docker compose down --rmi all --volumes  # + образы и тома текущего проекта
+```
+
+`docker compose down --rmi all --volumes` — «ядерный вариант»: если всё
+запуталось, начинаешь с чистого листа.
+
+## Полный цикл работы
+
+Ежедневная работа над контентом:
+
+```bash
+docker compose up docs
+```
+
+Открыть `http://localhost:8000`, править `.md`, видеть изменения сразу.
+
+Перед коммитом — прогнать проверки:
+
+```bash
+docker compose run --rm checks
+```
+
+Если зелено — коммит и push. CI на GitHub Actions прогонит те же
+проверки и опубликует сайт.
 
 ## Что выигрываем
 
-- Новая машина — только Docker Desktop и `docker compose up`.
-- CI и локальная сборка используют один и тот же образ.
-- Версии Sphinx и расширений фиксируются в `requirements.txt`.
+- Новая машина — только Docker Desktop и `docker compose up docs`.
+- Проверки в чистом окружении — не зависит от локального `.venv`.
+- Один и тот же `Dockerfile` используют `docs` и `checks`.
+- В будущем — тот же подход легко переносится на CI.
